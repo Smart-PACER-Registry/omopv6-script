@@ -2,7 +2,8 @@
 
 import pandas as pd
 import numpy as np
-from psycopg2 import connect, sql, DatabaseError
+import psycopg2
+from psycopg2 import connect, DatabaseError
 import psycopg2.extras as extras
 from configparser import ConfigParser
 from datetime import datetime
@@ -48,7 +49,7 @@ def connectdb():
         conn = connect(**params)
 		
         # create a cursor
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
 	    # execute a statement
         print('PostgreSQL database version:')
@@ -78,12 +79,13 @@ def getById(cur, id):
     
     cur.execute("SELECT * FROM %s WHERE concept_id = %s;" % (name_of_table, id))
     concept_table = cur.fetchone()
+    print('Found: {}'.format(concept_table))
     return concept_table
 
 def updateConcept(conn, row):
 
-    sql = "UPDATE concept SET concept_name = %s, concept_code = %s WHERE concept_id = %s" % (row['concept_name'],
-    row['concept_code'], row['concept_id'])
+    sql = "UPDATE concept SET concept_name = '%s', concept_code = '%s', concept_class_id = '%s', vocabulary_id = '%s'  WHERE concept_id = %s" % (str(row['concept_name']),
+    str(row['concept_code']), str(row['concept_class_id']), str(row['vocabulary_id']), row['concept_id'])
     cur.execute(sql)
     conn.commit()
 
@@ -92,34 +94,43 @@ def insertConcept(conn, row):
     cur = conn.cursor()
 
      # Get next available concept id
-    conceptid = getNextConcept(cur)
+    conceptid = row['concept_id']
 
     start_index = int(getConfig('database')['start_index'])
 
-    if conceptid < start_index:
-        conceptid = start_index
+    if conceptid < start_index or np.isnan(row['concept_id']):
+        print('concept_id {0} is less than user space id. Selecting a concept_code.'.format(conceptid))
+        conceptid = getNextConcept(cur)
 
-    print('Next concept id: %s' % str(conceptid))
+    print('Next concept id: %s' % conceptid)
     
     # Retreive default table update
     concept = getConfig('default')
-    concept["concept_id"] = str(conceptid)
-    concept["concept_name"] = str(conceptid)
+    concept['concept_id'] = conceptid
+    concept['concept_name'] = row['concept_name']
+    concept['vocabulary_id'] = row['vocabulary_id']
+    concept['concept_class_id'] = row['concept_class_id']
+    concept['concept_code'] = str(conceptid)
     
     # execute_batch(cur, insert_str, default_params)
     columns = ", ".join(list(concept.keys()))
     values = list(concept.values())
 
-    sql = "INSERT INTO concept (%s) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)" % (str(columns), 
-    values[0], str(values[1]), str(values[2]), str(values[3]), str(values[4]), str(values[5]), 
-    str(values[6]), str(values[7]), str(values[8]), str(values[9]))
+    sql = "INSERT INTO concept (%s) VALUES (%s, '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')" % (str(columns), values[0], str(values[1]), str(values[2]), str(values[3]), str(values[4]), str(values[5]), str(values[6]), str(values[7]), str(values[8]), str(values[9]))
+
     cur.execute(sql)
     conn.commit()
 
     return concept
 
+
 def needChange(row, concept):
-    hasChange = False
+    if concept is None:
+        return False
+    elif row['concept_id'] == concept[0]:
+        return True
+    else:
+        return False
 
 config()
 
@@ -141,23 +152,36 @@ inversecolumn = getConfig('mapping', False)
 for index, row in cwb.iterrows():
 
     #Create mapping frame 
-    print(row['concept_id'], row['concept_name'], row['vocabulary'], row['concept_code'])
+    print(row['concept_id'], row['concept_name'], row['vocabulary_id'], str(row['concept_code']))
 
     modified = False
     concept = {}
     if np.isnan(row['concept_id']):
         concept = insertConcept(conn, row)
-        modified=True
-    else:     
-        concept = getById(cur, row['concept_id'])
-        modified=needChange(row, concept)
-        if modified:
+        modified = True
+    else:
+        row['concept_id'] = int(row['concept_id'])
+        if type(row['concept_code']) is float:
+            row['concept_code'] = int(row['concept_code'])
+        else:
+            row['concept_code'] = str(row['concept_code'])
+
+        searched = getById(cur, row['concept_id'])
+        change = needChange(row, searched)
+        if change:
             updateConcept(conn, row)
+        else:
+            concept = insertConcept(conn, row)
 
     if modified:
-        wb.loc[index, inversecolumn['concept_id']] = str(concept['concept_id'])
-        wb.loc[index, inversecolumn['concept_name']] = str(concept['concept_name'])
+        print (concept)
+        print (index)
+        print (inversecolumn['concept_id'])
+        wb.loc[index, inversecolumn['concept_id']] = concept['concept_id']
+        # wb.loc[index, inversecolumn['concept_name']] = str(concept[1])
         wb.loc[index, inversecolumn['concept_code']] = str(concept['concept_code'])
+        # wb.loc[index, inversecolumn['vocabulary_id']] = str(concept[3])
+        # wb.loc[index, inversecolumn['concept_class_id']] = str(concept[4])
 
 print(wb)
 wb.to_excel(e['name'], index=False)
